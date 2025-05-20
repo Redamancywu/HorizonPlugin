@@ -18,13 +18,15 @@ class HorizonSDKPlugin : Plugin<Project> {
     override fun apply(project: Project) {
         // 注册DSL扩展
         val extension = project.extensions.create("horizon", HorizonExtension::class.java)
-        // 设置日志等级
-        PluginLogger.logLevel = try {
-            LogLevel.valueOf(extension.logLevel.uppercase())
-        } catch (e: Exception) {
-            LogLevel.INFO
+        // 日志等级设置移动到 afterEvaluate，确保能读取到 DSL 配置
+        project.afterEvaluate {
+            PluginLogger.logLevel = try {
+                LogLevel.valueOf(extension.logLevel.uppercase())
+            } catch (e: Exception) {
+                LogLevel.INFO
+            }
+            PluginLogger.info("HorizonSDKPlugin 已应用，欢迎使用！")
         }
-        PluginLogger.info("HorizonSDKPlugin 已应用，欢迎使用！")
         if (extension.enableAutoRegister) {
             // 同步DSL配置到project properties，供KSP参数读取
             project.extensions.extraProperties["horizon.modulePackages"] = extension.modulePackages.joinToString(",")
@@ -125,16 +127,20 @@ class HorizonSDKPlugin : Plugin<Project> {
                 var namespace: String? = null
                 if (buildGradle.exists()) {
                     val text = buildGradle.readText()
-                    namespace = Regex("namespace ['\"]([\w.]+)['\"]").find(text)?.groupValues?.getOrNull(1)
+                    namespace = Regex("""namespace ['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
                 } else if (buildGradleKts.exists()) {
                     val text = buildGradleKts.readText()
-                    namespace = Regex("namespace ?= ?['\"]([\w.]+)['\"]").find(text)?.groupValues?.getOrNull(1)
+                    namespace = Regex("""namespace ?= ?['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
                 }
                 if (namespace != null) {
                     val prefix = namespace.split('.').last() + "_"
                     val resDir = module.file("src/main/res")
                     if (resDir.exists() && resDir.isDirectory) {
-                        ResourceIsolationHelper.processResDir(resDir, prefix, enableResourceMd5)
+                        // 读取白名单配置
+                        val whiteList = com.neil.plugin.resource.ResourceIsolationHelper.loadWhiteListFromConfig(
+                            extension.resourceWhiteList, module.projectDir
+                        )
+                        ResourceIsolationHelper.processResDir(resDir, prefix, enableResourceMd5, whiteList = whiteList)
                     }
                 } else {
                     PluginLogger.warn("资源隔离检测：未检测到模块${module.name}的namespace，建议在build.gradle中声明namespace！")

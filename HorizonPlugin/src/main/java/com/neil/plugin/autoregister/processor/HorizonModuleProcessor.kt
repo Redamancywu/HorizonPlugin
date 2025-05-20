@@ -31,10 +31,32 @@ class HorizonModuleProcessor(
         PluginLogger.info("KSP参数：modulePackages=$modulePackages, excludePackages=$excludePackages, registerClassName=$registerClassName, outputDir=$outputDir, generatedPackage=$generatedPackage")
         val annotationName = "com.neil.plugin.autoregister.AutoRegisterModule"
         val symbols = resolver.getSymbolsWithAnnotation(annotationName)
+
+        // 新增：自动收集包名逻辑
+        val scanPackages: Set<String> = if (modulePackages.isEmpty()) {
+            val detected = symbols.filterIsInstance<KSClassDeclaration>()
+                .map { it.packageName.asString() }
+                .toSet()
+            if (detected.isNotEmpty()) {
+                PluginLogger.warn("[HorizonPlugin] 未配置 modulePackages，自动扫描到以下包名：")
+                detected.forEach { PluginLogger.warn(" - $it") }
+                // 新增：打印所有被注解的实现类
+                val detectedClasses = symbols.filterIsInstance<KSClassDeclaration>()
+                    .mapNotNull { it.qualifiedName?.asString() }
+                    .toSet()
+                PluginLogger.warn("[HorizonPlugin] 自动扫描到以下被@AutoRegisterModule标记的实现类：")
+                detectedClasses.forEach { PluginLogger.warn("   -> $it") }
+                PluginLogger.warn("建议将上述包名补充到 horizon DSL 的 modulePackages 配置中以提升性能和可控性。")
+            }
+            detected
+        } else {
+            modulePackages.toSet()
+        }
+
         val modules = symbols.filterIsInstance<KSClassDeclaration>()
             .filter { clazz ->
                 val pkg = clazz.packageName.asString()
-                (modulePackages.isEmpty() || modulePackages.any { pkg.startsWith(it) }) &&
+                (scanPackages.isEmpty() || scanPackages.any { pkg.startsWith(it) }) &&
                 (excludePackages.isEmpty() || excludePackages.none { pkg.startsWith(it) })
             }
             .mapNotNull { clazz ->

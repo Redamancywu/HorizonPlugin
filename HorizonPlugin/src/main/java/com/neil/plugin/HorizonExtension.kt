@@ -33,4 +33,6 @@ open class HorizonExtension {
 
     /** 追加自定义混淆规则 */
     var proguardRules: MutableList<String> = mutableListOf()
+
+    /**\n     * 资源白名单配置\n     * 支持：直接 List<String>，或指定文件路径（String/多个文件路径 List<String>）\n     * 文件支持 .txt（每行一个规则）、.json（数组）等，便于团队协作和版本管理\n     * 示例：resourceWhiteList = listOf("drawable:ic_sdk_*", "string:keep_me", "my_third_party_*")\n     *      resourceWhiteList = "sdk_whitelist.txt"\n     *      resourceWhiteList = listOf("sdk_whitelist.txt", "module_whitelist.txt")\n     * 作者：Redamancy  时间：2025-05-19\n     */\n    var resourceWhiteList: Any? = null
 } 
