@@ -41,6 +41,17 @@ object ResourceIsolationHelper {
         return n
     }
 
+    /**
+     * 处理资源目录，进行资源隔离和重命名
+     * @param resDir 资源目录
+     * @param prefix 资源前缀
+     * @param enableMd5 是否启用MD5计算
+     * @param moduleName 模块名称
+     * @param flavorName flavor名称
+     * @param resourcePrefixPattern 资源前缀模式
+     * @param whiteList 白名单列表
+     * @return 处理的文件数量
+     */
     fun processResDir(
         resDir: File,
         prefix: String,
@@ -49,12 +60,15 @@ object ResourceIsolationHelper {
         flavorName: String? = null,
         resourcePrefixPattern: String? = null,
         whiteList: List<String> = emptyList()
-    ) {
+    ): Int {
         val finalPrefix = resourcePrefixPattern
             ?.replace("{module}", moduleName ?: "")
             ?.replace("{flavor}", flavorName ?: "")
             ?: prefix
         val renameMap = mutableMapOf<String, String>()
+        // 统计处理的资源数量
+        var processedCount = 0
+        
         // 1. 文件级资源自动重命名，并处理xml内容
         resDir.walkTopDown().filter { it.isFile && it.parentFile.name != "." && it.parentFile.name != "values" && it.name != "AndroidManifest.xml" }.forEach { resFile ->
             val nameWithoutExt = resFile.nameWithoutExtension
@@ -83,11 +97,16 @@ object ResourceIsolationHelper {
                         PluginLogger.error("资源重命名失败：${resFile.name} -> ${newFile.name}，请检查文件权限或是否已存在同名文件")
                     } else {
                         renameMap[nameWithoutExt] = File(newFile.parent, newFile.name).nameWithoutExtension
+                        processedCount++
                     }
                 }
             }
             if (resFile.extension == "xml") {
-                processXmlResourceContent(resFile, finalPrefix, enableMd5)
+                val beforeMd5 = md5(resFile.readBytes())
+                val xmlChanged = processXmlResourceContent(resFile, finalPrefix, enableMd5)
+                if (xmlChanged) {
+                    processedCount++
+                }
             }
         }
         // 2. values资源项自动加前缀（保持原有）
@@ -128,9 +147,10 @@ object ResourceIsolationHelper {
                 val newMd5 = md5(xmlFile.readBytes())
                 PluginLogger.info("values资源变更MD5: ${xmlFile.name} $oldMd5 -> $newMd5")
                 PluginLogger.debug("values资源变更MD5: ${xmlFile.name} $oldMd5 -> $newMd5")
+                processedCount++
             }
         }
-        // 3. 自动同步所有xml文件中的资源引用（保留@+id/xxx格式不变，正则优化，支持Databinding表达式）
+        // 3. 自动同步所有xml文件中的资源引用（只替换资源名部分，保留@+id/等格式）
         val xmlFiles = resDir.walkTopDown().filter { it.isFile && it.extension == "xml" && it.name != "AndroidManifest.xml" }.toList()
         val resourceTypes = listOf("drawable", "color", "string", "id", "layout", "anim", "menu", "mipmap", "xml", "raw", "font", "styleable", "attr", "plurals", "bool", "integer", "array", "dimen", "fraction", "interpolator")
         xmlFiles.forEach { xmlFile ->
@@ -139,24 +159,25 @@ object ResourceIsolationHelper {
             renameMap.forEach { (oldName, newName) ->
                 resourceTypes.forEach { type ->
                     if (isInWhiteList(oldName, type, whiteList)) return@forEach
-                    // 替换@type/oldName为@type/newName，但不替换@+id/oldName，支持边界和引号
-                    val regex = Regex("@(?!!\+id/)$type/$oldName(?=[\b"'\s<])")
+                    // 只替换@+id/oldName 或 @id/oldName 或 @type/oldName 的 oldName 部分，保留@+id/等格式
+                    val regex = Regex("(@\\+?${type}/)${oldName}\\b")
                     val before = content
                     content = content.replace(regex) { matchResult ->
-                        "@${type}/$newName"
+                        matchResult.groupValues[1] + newName
                     }
-                    // Databinding表达式 @{...@string/oldName...}
-                    val dbRegex = Regex("@\{[^}]*@$type/$oldName[^}]*}")
-                    content = content.replace(dbRegex) { it.value.replace("@$type/$oldName", "@$type/$newName") }
+                    // Databinding表达式 @{...@type/oldName...}
+                    val dbRegex = Regex("@\\{[^}]*@${type}/${oldName}[^}]*}")
+                    content = content.replace(dbRegex) { it.value.replace("@${type}/${oldName}", "@${type}/${newName}") }
                     if (before != content) {
-                        PluginLogger.info("xml资源引用同步：${xmlFile.name} @${type}/$oldName -> @${type}/$newName")
-                        PluginLogger.debug("xml资源引用同步：${xmlFile.name} @${type}/$oldName -> @${type}/$newName")
+                        PluginLogger.info("xml资源引用同步：${xmlFile.name} @${type}/${oldName} -> @${type}/${newName}")
+                        PluginLogger.debug("xml资源引用同步：${xmlFile.name} @${type}/${oldName} -> @${type}/${newName}")
                         changed = true
                     }
                 }
             }
             if (changed) {
                 xmlFile.writeText(content)
+                processedCount++
             }
         }
         // 4. 导出重命名映射表到 build/resource_rename_map.json
@@ -197,6 +218,7 @@ object ResourceIsolationHelper {
                         }
                         if (changed) {
                             codeFile.writeText(content)
+                            processedCount++
                         }
                     }
                 }
@@ -235,6 +257,7 @@ object ResourceIsolationHelper {
                         }
                         if (changed) {
                             codeFile.writeText(content)
+                            processedCount++
                         }
                     }
                 }
@@ -275,6 +298,9 @@ object ResourceIsolationHelper {
         }
         // 8. 回滚与备份机制说明
         PluginLogger.info("所有源码和xml自动替换前已自动备份为 .bak_resreplace/.bak_viewbindingreplace 文件，如需回滚可手动还原。")
+        
+        // 最后返回处理的资源数量
+        return processedCount
     }
 
     private fun md5(bytes: ByteArray): String {
@@ -283,42 +309,68 @@ object ResourceIsolationHelper {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    // 新增：处理xml内容中的资源名
-    private fun processXmlResourceContent(xmlFile: File, prefix: String, enableMd5: Boolean) {
+    // 处理xml内容中的资源名
+    private fun processXmlResourceContent(xmlFile: File, prefix: String, enableMd5: Boolean): Boolean {
         try {
             val oldMd5 = md5(xmlFile.readBytes())
-            val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(xmlFile)
-            val nodes = doc.getElementsByTagName("*")
+            // 用文本处理替代DOM解析，确保格式正确
+            var content = xmlFile.readText()
             var changed = false
-            for (i in 0 until nodes.length) {
-                val node = nodes.item(i)
-                if (node is org.w3c.dom.Element) {
-                    // 处理android:id、style、name等属性
-                    val attrs = listOf("android:id", "style", "name", "color", "drawable", "attr", "string")
-                    for (attr in attrs) {
-                        if (node.hasAttribute(attr)) {
-                            val value = node.getAttribute(attr)
-                            if (!value.startsWith(prefix) && value.startsWith("@")) {
-                                val newValue = "@" + prefix + value.substring(1)
-                                node.setAttribute(attr, newValue)
-                                PluginLogger.info("xml资源内容自动加前缀：$value -> $newValue")
-                                PluginLogger.debug("xml资源内容自动加前缀：$value -> $newValue")
-                                changed = true
-                            }
-                        }
+            
+            // 支持的资源类型
+            val resourceTypes = listOf("id", "drawable", "layout", "color", "style", "string", "menu", "anim", "array", "attr", "plurals", "dimen", "fraction", "bool", "integer", "interpolator")
+            
+            // 修复严重错误格式：@sdkdemo_sdkdemo_id/main 应为 @+id/sdkdemo_main
+            val brokenRegex = Regex("@([a-zA-Z0-9_]+)_([a-zA-Z0-9_]+)/([a-zA-Z0-9_]+)")
+            content = content.replace(brokenRegex) { matchResult ->
+                val ns = matchResult.groupValues[1]     // sdkdemo
+                val resType = matchResult.groupValues[2] // id
+                val name = matchResult.groupValues[3]   // main
+                
+                // 检查resType是否为有效的资源类型
+                if (resourceTypes.contains(resType)) {
+                    // 恢复成正确格式 @+id/sdkdemo_main 或 @id/sdkdemo_main
+                    val newValue = "@+$resType/${ns}_$name"
+                    changed = true
+                    PluginLogger.info("修复严重错误格式：${matchResult.value} -> $newValue")
+                    newValue
+                } else {
+                    // 如果不是有效的资源类型，保持原样
+                    matchResult.value
+                }
+            }
+            
+            // 匹配每个资源类型
+            resourceTypes.forEach { type ->
+                // 匹配 @+type/name 或 @type/name，只替换name部分
+                val regex = Regex("(@\\+?$type/)([a-zA-Z0-9_]+)")
+                content = content.replace(regex) { matchResult ->
+                    val prefix1 = matchResult.groupValues[1] // @+id/ or @id/
+                    val name = matchResult.groupValues[2]   // 资源名
+                    
+                    // 如果已经有前缀则跳过
+                    if (name.startsWith(prefix)) {
+                        matchResult.value
+                    } else {
+                        val newName = "$prefix$name"
+                        changed = true
+                        PluginLogger.info("xml资源引用正确格式加前缀：${matchResult.value} -> ${prefix1}${newName}")
+                        "${prefix1}${newName}"
                     }
                 }
             }
+            
             if (changed) {
-                val transformer = TransformerFactory.newInstance().newTransformer()
-                transformer.transform(DOMSource(doc), StreamResult(xmlFile))
+                xmlFile.writeText(content)
                 val newMd5 = md5(xmlFile.readBytes())
                 PluginLogger.info("xml资源内容变更MD5: ${xmlFile.name} $oldMd5 -> $newMd5")
-                PluginLogger.debug("xml资源内容变更MD5: ${xmlFile.name} $oldMd5 -> $newMd5")
             }
+            
+            return changed
         } catch (e: Exception) {
             PluginLogger.warn("处理xml资源内容时出错：${xmlFile.name}，原因：${e.message}")
             PluginLogger.error("处理xml资源内容时出错：${xmlFile.name}，原因：${e.message}")
+            return false
         }
     }
 
@@ -338,10 +390,38 @@ object ResourceIsolationHelper {
                     file.extension == "json" -> {
                         // 简单json数组解析
                         val text = file.readText().trim()
-                        Regex("\\[.*?]", RegexOption.DOT_MATCHES_ALL).find(text)?.value
-                            ?.removeSurrounding("[", "]")\
-                            ?.split(",")\
-                            ?.map { it.trim().removeSurrounding("\"", "\"") }\
+                        Regex("\\[.*?\\]", RegexOption.DOT_MATCHES_ALL).find(text)?.value
+                            ?.removeSurrounding("[", "]")
+                            ?.split(",")
+                            ?.map { it.trim().removeSurrounding("\"", "\"").removeSurrounding("'", "'") }
                             ?.filter { it.isNotEmpty() } ?: emptyList()
-                    }\n                    else -> file.readLines().map { it.trim() }.filter { it.isNotEmpty() }\n                }\n            } else emptyList()\n        }\n        return when (config) {\n            is List<*> -> config.flatMap {\n                if (it is String && (it.endsWith(".txt") || it.endsWith(".json"))) {\n                    readFile(File(if (File(it).isAbsolute) it else File(projectDir, it).absolutePath))\n                } else if (it is String) listOf(it) else emptyList()\n            }.toSet().toList()\n            is String -> {\n                if (config.endsWith(".txt") || config.endsWith(".json")) {\n                    readFile(File(if (File(config).isAbsolute) config else File(projectDir, config).absolutePath))\n                } else listOf(config)\n            }\n            else -> emptyList()\n        }\n    }
+                    }
+                    else -> file.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+                }
+            } else {
+                PluginLogger.warn("资源白名单文件不存在: ${file.absolutePath}")
+                emptyList()
+            }
+        }
+        return when (config) {
+            is List<*> -> config.flatMap {
+                when (it) {
+                    is String -> {
+                        if (it.endsWith(".txt") || it.endsWith(".json")) {
+                            val fileToRead = if (File(it).isAbsolute) File(it) else File(projectDir, it)
+                            readFile(fileToRead)
+                        } else listOf(it)
+                    }
+                    else -> emptyList()
+                }
+            }.toSet().toList()
+            is String -> {
+                if (config.endsWith(".txt") || config.endsWith(".json")) {
+                    val fileToRead = if (File(config).isAbsolute) File(config) else File(projectDir, config)
+                    readFile(fileToRead)
+                } else listOf(config)
+            }
+            else -> emptyList()
+        }
+    }
 } 

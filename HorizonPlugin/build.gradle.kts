@@ -8,7 +8,7 @@ plugins {
     id("com.gradle.plugin-publish") version "1.2.1"
 }
 group = "com.neil.plugin" // 组织ID
-version = "1.0.2"         // 插件版本号
+version = "1.0.7"         // 插件版本号更新
 
 java {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -28,6 +28,8 @@ dependencies {
     // 作者：Redamancy  时间：2025-05-19
     // 依赖 AGP 以支持 android/buildTypes/proguardFile 相关 API
     implementation("com.android.tools.build:gradle:8.1.0")
+    // 添加org.json库，用于处理JSON文件
+    implementation("org.json:json:20231013")
 }
 
 // Gradle Plugin Portal 发布配置
@@ -43,6 +45,40 @@ gradlePlugin {
             tags.set(listOf("android", "sdk", "ksp", "auto-register"))
             website.set("https://github.com/Redamancywu/HorizonPlugin")
             vcsUrl.set("https://github.com/Redamancywu/HorizonPlugin.git")
+        }
+    }
+}
+
+// 发布到 mavenLocal 供本地测试
+// 运行: ./gradlew publishToMavenLocal
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            groupId = project.group.toString()
+            artifactId = "horizon-plugin"
+            version = project.version.toString()
+            
+            from(components["java"])
+            
+            // 添加POM信息
+            pom {
+                name.set("HorizonSDKPlugin")
+                description.set("A universal Gradle plugin for Android SDK multi-module projects")
+                url.set("https://github.com/Redamancywu/HorizonPlugin")
+                licenses {
+                    license {
+                        name.set("The Apache License, Version 2.0")
+                        url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                    }
+                }
+                developers {
+                    developer {
+                        id.set("redamancy")
+                        name.set("Redamancy")
+                        email.set("redamancy@example.com")
+                    }
+                }
+            }
         }
     }
 }

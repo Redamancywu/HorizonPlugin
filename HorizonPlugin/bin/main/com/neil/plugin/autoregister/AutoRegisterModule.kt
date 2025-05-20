@@ -1,4 +1,4 @@
-// 作者：Redamancy  时间：2025-05-19
+// 作者：Redamancy  时间：2025-05-20
 package com.neil.plugin.autoregister
 
 /**
@@ -9,7 +9,8 @@ package com.neil.plugin.autoregister
  * @param author 作者，默认空字符串
  * @param version 版本，默认"1.0.0"
  * @param group 分组，默认空字符串
- * 作者：Redamancy  时间：2025-05-19
+ * @param lazy 是否懒加载，默认false（即立即加载）
+ * 作者：Redamancy  时间：2025-05-20
  */
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)
@@ -18,5 +19,6 @@ annotation class AutoRegisterModule(
     val type: String = "default",
     val author: String = "",
     val version: String = "1.0.0",
-    val group: String = ""
+    val group: String = "",
+    val lazy: Boolean = false
 )
