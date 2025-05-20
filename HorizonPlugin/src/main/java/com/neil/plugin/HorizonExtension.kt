@@ -4,6 +4,7 @@ package com.neil.plugin
 
 import com.neil.plugin.logger.LogLevel
 import com.neil.plugin.logger.PluginLogger
+import com.neil.plugin.resource.ResourceNamingStrategy
 import org.gradle.api.Project
 import java.io.File
 
@@ -57,6 +58,46 @@ open class HorizonExtension {
      * 作者：Redamancy  时间：2025-05-23
      */
     var resourcePrefixPattern: String? = null
+    
+    /**
+     * 资源后缀模式
+     * 支持：{module}=模块名, {flavor}=flavor名
+     * 示例："_{module}_{flavor}"
+     * 作者：Redamancy  时间：2025-05-27
+     */
+    var resourceSuffixPattern: String? = null
+    
+    /**
+     * 资源命名策略
+     * PREFIX: 前缀模式，在资源名前添加前缀
+     * SUFFIX: 后缀模式，在资源名后添加后缀
+     * 默认为PREFIX
+     * 作者：Redamancy  时间：2025-05-27
+     */
+    var resourceNamingStrategy: ResourceNamingStrategy = ResourceNamingStrategy.PREFIX
+    
+    /**
+     * 是否保留原始资源名
+     * true: 保留原始资源名，在前缀/后缀之后保留原名
+     * false: 不保留原始资源名，使用MD5替代
+     * 默认为true
+     * 作者：Redamancy  时间：2025-05-27
+     */
+    var keepOriginalName: Boolean = true
+    
+    /**
+     * MD5长度，用于生成MD5资源名称时指定长度
+     * 默认为8
+     * 作者：Redamancy  时间：2025-05-27
+     */
+    var resourceMd5Length: Int = 8
+    
+    /**
+     * 资源映射表输出路径
+     * 默认为"build/reports/resources/resource_rename_map.json"
+     * 作者：Redamancy  时间：2025-05-27
+     */
+    var resourceMapOutputPath: String = "build/reports/resources/resource_rename_map.json"
     
     /**
      * 是否启用代码引用分析，默认false
@@ -166,6 +207,20 @@ open class HorizonExtension {
         // 验证资源前缀模式
         if (resourcePrefixPattern?.isEmpty() == true) {
             resourcePrefixPattern = null
+        }
+        
+        // 验证资源后缀模式
+        if (resourceSuffixPattern?.isEmpty() == true) {
+            resourceSuffixPattern = null
+        }
+        
+        // 验证资源命名策略
+        if (resourceNamingStrategy == ResourceNamingStrategy.PREFIX && resourcePrefixPattern == null) {
+            PluginLogger.warn("警告: 已设置前缀命名策略，但未设置资源前缀模式(resourcePrefixPattern)，将使用模块包名的最后一部分作为前缀")
+        }
+        
+        if (resourceNamingStrategy == ResourceNamingStrategy.SUFFIX && resourceSuffixPattern == null) {
+            PluginLogger.warn("警告: 已设置后缀命名策略，但未设置资源后缀模式(resourceSuffixPattern)，将使用'_模块名'作为默认后缀")
         }
         
         // 验证是否启用代码引用分析

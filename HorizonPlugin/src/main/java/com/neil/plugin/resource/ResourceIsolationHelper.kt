@@ -13,11 +13,12 @@ import javax.xml.transform.stream.StreamResult
 /**
  * 资源隔离与自动重命名工具
  * 支持：
- * 1. 文件级资源自动重命名（加前缀/加md5）
- * 2. values资源项自动加前缀
+ * 1. 文件级资源自动重命名（加前缀/后缀/md5）
+ * 2. values资源项自动添加前缀/后缀
  * @param prefix 资源前缀
+ * @param suffix 资源后缀
  * @param enableMd5 是否启用md5重命名
- * 作者：Redamancy  时间：2025-05-19
+ * 作者：Redamancy  时间：2025-05-27
  */
 object ResourceIsolationHelper {
     // 白名单匹配工具
@@ -45,26 +46,48 @@ object ResourceIsolationHelper {
      * 处理资源目录，进行资源隔离和重命名
      * @param resDir 资源目录
      * @param prefix 资源前缀
+     * @param suffix 资源后缀
      * @param enableMd5 是否启用MD5计算
      * @param moduleName 模块名称
      * @param flavorName flavor名称
      * @param resourcePrefixPattern 资源前缀模式
+     * @param resourceSuffixPattern 资源后缀模式
+     * @param namingStrategy 资源命名策略
+     * @param keepOriginalName 是否保留原始资源名
+     * @param md5Length MD5长度
+     * @param mapOutputPath 资源映射表输出路径
      * @param whiteList 白名单列表
      * @return 处理的文件数量
      */
     fun processResDir(
         resDir: File,
         prefix: String,
+        suffix: String = "",
         enableMd5: Boolean = false,
         moduleName: String? = null,
         flavorName: String? = null,
         resourcePrefixPattern: String? = null,
+        resourceSuffixPattern: String? = null,
+        namingStrategy: ResourceNamingStrategy = ResourceNamingStrategy.PREFIX,
+        keepOriginalName: Boolean = true,
+        md5Length: Int = 8,
+        mapOutputPath: String = "build/reports/resources/resource_rename_map.json",
         whiteList: List<String> = emptyList()
     ): Int {
-        val finalPrefix = resourcePrefixPattern
-            ?.replace("{module}", moduleName ?: "")
-            ?.replace("{flavor}", flavorName ?: "")
-            ?: prefix
+        val finalPrefix = if (namingStrategy == ResourceNamingStrategy.PREFIX) {
+            resourcePrefixPattern
+                ?.replace("{module}", moduleName ?: "")
+                ?.replace("{flavor}", flavorName ?: "")
+                ?: prefix
+        } else ""
+        
+        val finalSuffix = if (namingStrategy == ResourceNamingStrategy.SUFFIX) {
+            resourceSuffixPattern
+                ?.replace("{module}", moduleName ?: "")
+                ?.replace("{flavor}", flavorName ?: "")
+                ?: suffix
+        } else ""
+        
         val renameMap = mutableMapOf<String, String>()
         // 统计处理的资源数量
         var processedCount = 0
@@ -78,9 +101,47 @@ object ResourceIsolationHelper {
                 return@forEach
             }
             val legalName = legalizeResourceName(nameWithoutExt)
-            if (!resFile.name.startsWith(finalPrefix)) {
-                val oldMd5 = md5(resFile.readBytes())
-                val newName = if (enableMd5) finalPrefix + oldMd5 + "_" + legalName + "." + resFile.extension else finalPrefix + legalName + "." + resFile.extension
+            
+            // 检查是否需要重命名
+            val needRename = when (namingStrategy) {
+                ResourceNamingStrategy.PREFIX -> !resFile.name.startsWith(finalPrefix)
+                ResourceNamingStrategy.SUFFIX -> {
+                    val dotIndex = resFile.name.lastIndexOf(".")
+                    if (dotIndex > 0) {
+                        !resFile.name.substring(0, dotIndex).endsWith(finalSuffix)
+                    } else true
+                }
+            }
+            
+            if (needRename) {
+                val oldMd5 = md5(resFile.readBytes()).substring(0, md5Length)
+                
+                // 生成新文件名
+                val newName = when (namingStrategy) {
+                    ResourceNamingStrategy.PREFIX -> {
+                        if (enableMd5) {
+                            if (keepOriginalName) {
+                                "$finalPrefix${oldMd5}_$legalName.${resFile.extension}"
+                            } else {
+                                "$finalPrefix${oldMd5}.${resFile.extension}"
+                            }
+                        } else {
+                            "$finalPrefix$legalName.${resFile.extension}"
+                        }
+                    }
+                    ResourceNamingStrategy.SUFFIX -> {
+                        if (enableMd5) {
+                            if (keepOriginalName) {
+                                "$legalName${finalSuffix}_$oldMd5.${resFile.extension}"
+                            } else {
+                                "res${finalSuffix}_$oldMd5.${resFile.extension}"
+                            }
+                        } else {
+                            "$legalName$finalSuffix.${resFile.extension}"
+                        }
+                    }
+                }
+                
                 val newFile = File(resFile.parent + File.separator + newName)
                 if (newFile.exists()) {
                     PluginLogger.warn("资源重命名冲突：${newFile.name} 已存在，跳过 ${resFile.name}")
@@ -89,7 +150,7 @@ object ResourceIsolationHelper {
                     val backupFile = File(resFile.parent, resFile.name + ".bak_resreplace")
                     if (!backupFile.exists()) resFile.copyTo(backupFile)
                     val renameSuccess = resFile.renameTo(newFile)
-                    val newMd5 = if (newFile.exists()) md5(newFile.readBytes()) else "文件不存在"
+                    val newMd5 = if (newFile.exists()) md5(newFile.readBytes()).substring(0, md5Length) else "文件不存在"
                     PluginLogger.info("资源自动重命名：${resFile.name} -> ${newFile.name}，MD5: $oldMd5 -> $newMd5")
                     PluginLogger.debug("资源自动重命名：${resFile.name} -> ${newFile.name}，MD5: $oldMd5 -> $newMd5")
                     if (!renameSuccess) {
@@ -102,17 +163,17 @@ object ResourceIsolationHelper {
                 }
             }
             if (resFile.extension == "xml") {
-                val beforeMd5 = md5(resFile.readBytes())
-                val xmlChanged = processXmlResourceContent(resFile, finalPrefix, enableMd5)
+                val beforeMd5 = md5(resFile.readBytes()).substring(0, md5Length)
+                val xmlChanged = processXmlResourceContent(resFile, finalPrefix, finalSuffix, namingStrategy, enableMd5)
                 if (xmlChanged) {
                     processedCount++
                 }
             }
         }
-        // 2. values资源项自动加前缀（保持原有）
+        // 2. values资源项自动加前缀/后缀
         val valuesDir = File(resDir, "values")
         valuesDir.listFiles { file -> file.extension == "xml" }?.forEach { xmlFile ->
-            val oldMd5 = md5(xmlFile.readBytes())
+            val oldMd5 = md5(xmlFile.readBytes()).substring(0, md5Length)
             val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(xmlFile)
             val nodes = doc.getElementsByTagName("*")
             var changed = false
@@ -126,16 +187,54 @@ object ResourceIsolationHelper {
                         continue
                     }
                     val legalName = legalizeResourceName(name)
-                    val newName = if (enableMd5) finalPrefix + md5(name.toByteArray()) + "_" + legalName else finalPrefix + legalName
-                    if (!name.startsWith(finalPrefix) && valuesDir.walkTopDown().any { it.isFile && it.extension == "xml" && it.readText().contains("name=\"$newName\"") }) {
-                        PluginLogger.warn("values资源命名冲突：$newName 已存在，跳过 $name")
-                        PluginLogger.error("values资源命名冲突：$newName 已存在，跳过 $name")
-                        continue
+                    
+                    // 检查是否需要重命名
+                    val needRename = when (namingStrategy) {
+                        ResourceNamingStrategy.PREFIX -> !name.startsWith(finalPrefix)
+                        ResourceNamingStrategy.SUFFIX -> !name.endsWith(finalSuffix)
                     }
-                    if (!name.startsWith(finalPrefix)) {
+                    
+                    if (needRename) {
+                        val newName = when (namingStrategy) {
+                            ResourceNamingStrategy.PREFIX -> {
+                                if (enableMd5) {
+                                    if (keepOriginalName) {
+                                        "$finalPrefix${md5(name.toByteArray()).substring(0, md5Length)}_$legalName"
+                                    } else {
+                                        "$finalPrefix${md5(name.toByteArray()).substring(0, md5Length)}"
+                                    }
+                                } else {
+                                    "$finalPrefix$legalName"
+                                }
+                            }
+                            ResourceNamingStrategy.SUFFIX -> {
+                                if (enableMd5) {
+                                    if (keepOriginalName) {
+                                        "$legalName${finalSuffix}_${md5(name.toByteArray()).substring(0, md5Length)}"
+                                    } else {
+                                        "res${finalSuffix}_${md5(name.toByteArray()).substring(0, md5Length)}"
+                                    }
+                                } else {
+                                    "$legalName$finalSuffix"
+                                }
+                            }
+                        }
+                        
+                        // 检查是否存在命名冲突
+                        val conflictExists = valuesDir.walkTopDown().any { 
+                            it.isFile && it.extension == "xml" && it.readText().contains("name=\"$newName\"") 
+                        }
+                        
+                        if (conflictExists) {
+                            PluginLogger.warn("values资源命名冲突：$newName 已存在，跳过 $name")
+                            PluginLogger.error("values资源命名冲突：$newName 已存在，跳过 $name")
+                            continue
+                        }
+                        
                         node.setAttribute("name", newName)
-                        PluginLogger.info("values资源自动加前缀：$name -> $newName")
-                        PluginLogger.debug("values资源自动加前缀：$name -> $newName")
+                        val nameTypeText = if (namingStrategy == ResourceNamingStrategy.PREFIX) "前缀" else "后缀"
+                        PluginLogger.info("values资源自动添加$nameTypeText：$name -> $newName")
+                        PluginLogger.debug("values资源自动添加$nameTypeText：$name -> $newName")
                         changed = true
                         renameMap[name] = newName
                     }
@@ -144,7 +243,7 @@ object ResourceIsolationHelper {
             if (changed) {
                 val transformer = TransformerFactory.newInstance().newTransformer()
                 transformer.transform(DOMSource(doc), StreamResult(xmlFile))
-                val newMd5 = md5(xmlFile.readBytes())
+                val newMd5 = md5(xmlFile.readBytes()).substring(0, md5Length)
                 PluginLogger.info("values资源变更MD5: ${xmlFile.name} $oldMd5 -> $newMd5")
                 PluginLogger.debug("values资源变更MD5: ${xmlFile.name} $oldMd5 -> $newMd5")
                 processedCount++
@@ -180,11 +279,11 @@ object ResourceIsolationHelper {
                 processedCount++
             }
         }
-        // 4. 导出重命名映射表到 build/resource_rename_map.json
+        // 4. 导出重命名映射表
         try {
-            val buildDir = File(resDir.parentFile?.parentFile, "build")
+            val buildDir = File(resDir.parentFile?.parentFile, mapOutputPath.substringBeforeLast("/"))
             if (!buildDir.exists()) buildDir.mkdirs()
-            val mapFile = File(buildDir, "resource_rename_map.json")
+            val mapFile = File(resDir.parentFile?.parentFile, mapOutputPath)
             mapFile.writeText(renameMap.entries.joinToString(prefix = "{\n", postfix = "\n}", separator = ",\n") { "    \"${it.key}\": \"${it.value}\"" })
             PluginLogger.info("资源重命名映射表已导出到: ${mapFile.absolutePath}")
         } catch (e: Exception) {
@@ -309,8 +408,14 @@ object ResourceIsolationHelper {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    // 处理xml内容中的资源名
-    private fun processXmlResourceContent(xmlFile: File, prefix: String, enableMd5: Boolean): Boolean {
+    // 修改处理xml内容中的资源名功能，支持前缀和后缀两种模式
+    private fun processXmlResourceContent(
+        xmlFile: File, 
+        prefix: String, 
+        suffix: String,
+        namingStrategy: ResourceNamingStrategy,
+        enableMd5: Boolean
+    ): Boolean {
         try {
             val oldMd5 = md5(xmlFile.readBytes())
             // 用文本处理替代DOM解析，确保格式正确
@@ -329,8 +434,13 @@ object ResourceIsolationHelper {
                 
                 // 检查resType是否为有效的资源类型
                 if (resourceTypes.contains(resType)) {
-                    // 恢复成正确格式 @+id/sdkdemo_main 或 @id/sdkdemo_main
-                    val newValue = "@+$resType/${ns}_$name"
+                    // 根据命名策略生成新的资源名
+                    val newName = when (namingStrategy) {
+                        ResourceNamingStrategy.PREFIX -> "${ns}_$name"
+                        ResourceNamingStrategy.SUFFIX -> "$name${suffix.ifEmpty { "_$ns" }}"
+                    }
+                    // 恢复成正确格式 @+id/前缀_name 或 @+id/name_后缀
+                    val newValue = "@+$resType/$newName"
                     changed = true
                     PluginLogger.info("修复严重错误格式：${matchResult.value} -> $newValue")
                     newValue
@@ -340,7 +450,7 @@ object ResourceIsolationHelper {
                 }
             }
             
-            // 匹配每个资源类型
+            // 根据命名策略匹配每个资源类型
             resourceTypes.forEach { type ->
                 // 匹配 @+type/name 或 @type/name，只替换name部分
                 val regex = Regex("(@\\+?$type/)([a-zA-Z0-9_]+)")
@@ -348,14 +458,23 @@ object ResourceIsolationHelper {
                     val prefix1 = matchResult.groupValues[1] // @+id/ or @id/
                     val name = matchResult.groupValues[2]   // 资源名
                     
-                    // 如果已经有前缀则跳过
-                    if (name.startsWith(prefix)) {
-                        matchResult.value
-                    } else {
-                        val newName = "$prefix$name"
+                    // 根据命名策略检查是否已有前缀/后缀
+                    val needUpdate = when (namingStrategy) {
+                        ResourceNamingStrategy.PREFIX -> !name.startsWith(prefix)
+                        ResourceNamingStrategy.SUFFIX -> !name.endsWith(suffix)
+                    }
+                    
+                    if (needUpdate) {
+                        val newName = when (namingStrategy) {
+                            ResourceNamingStrategy.PREFIX -> "$prefix$name"
+                            ResourceNamingStrategy.SUFFIX -> "$name$suffix"
+                        }
+                        val strategyName = if (namingStrategy == ResourceNamingStrategy.PREFIX) "前缀" else "后缀"
                         changed = true
-                        PluginLogger.info("xml资源引用正确格式加前缀：${matchResult.value} -> ${prefix1}${newName}")
+                        PluginLogger.info("xml资源引用正确格式添加$strategyName：${matchResult.value} -> ${prefix1}${newName}")
                         "${prefix1}${newName}"
+                    } else {
+                        matchResult.value
                     }
                 }
             }

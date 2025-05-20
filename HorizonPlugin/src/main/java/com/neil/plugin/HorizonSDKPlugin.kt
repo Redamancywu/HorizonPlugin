@@ -14,6 +14,7 @@ import com.neil.plugin.manifest.ManifestMerger
 import com.neil.plugin.proguard.ProguardInjector
 import com.neil.plugin.resource.ResourceReferenceUpdater
 import java.io.File
+import com.neil.plugin.resource.ResourceNamingStrategy
 
 /**
  * 插件入口，自动注册Horizon SDK相关功能
@@ -115,6 +116,13 @@ class HorizonSDKPlugin : Plugin<Project> {
                 val md5StatusText = if (enableResourceMd5) "已启用" else "未启用"
                 PluginLogger.info("资源MD5计算：$md5StatusText")
                 
+                // 记录资源命名策略
+                val strategyText = when(extension.resourceNamingStrategy) {
+                    ResourceNamingStrategy.PREFIX -> "前缀模式"
+                    ResourceNamingStrategy.SUFFIX -> "后缀模式"
+                }
+                PluginLogger.info("资源命名策略：$strategyText")
+                
                 val allModules = project.rootProject.subprojects.filter { it != project }
                 allModules.forEach { module ->
                     val buildGradle = module.file("build.gradle")
@@ -128,15 +136,38 @@ class HorizonSDKPlugin : Plugin<Project> {
                         namespace = Regex("""namespace ?= ?['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
                     }
                     if (namespace != null) {
-                        // 处理资源前缀模式
-                        val prefixPattern = extension.resourcePrefixPattern
-                        val prefix = if (prefixPattern != null) {
-                            prefixPattern
-                                .replace("{module}", module.name)
-                                .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
-                        } else {
-                            namespace.split('.').last() + "_"
-                        }
+                        // 处理资源前缀/后缀模式
+                        val namingStrategy = extension.resourceNamingStrategy
+                        
+                        // 前缀模式处理
+                        val prefix = if (namingStrategy == ResourceNamingStrategy.PREFIX) {
+                            val prefixPattern = extension.resourcePrefixPattern
+                            if (prefixPattern != null) {
+                                prefixPattern
+                                    .replace("{module}", module.name)
+                                    .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
+                                    .replace("{package}", namespace.split('.').last())
+                                    .replace("{variant}", project.findProperty("variantName") as? String ?: "")
+                                    .replace("{buildType}", project.findProperty("buildType") as? String ?: "")
+                            } else {
+                                namespace.split('.').last() + "_"
+                            }
+                        } else ""
+                        
+                        // 后缀模式处理
+                        val suffix = if (namingStrategy == ResourceNamingStrategy.SUFFIX) {
+                            val suffixPattern = extension.resourceSuffixPattern
+                            if (suffixPattern != null) {
+                                suffixPattern
+                                    .replace("{module}", module.name)
+                                    .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
+                                    .replace("{package}", namespace.split('.').last())
+                                    .replace("{variant}", project.findProperty("variantName") as? String ?: "")
+                                    .replace("{buildType}", project.findProperty("buildType") as? String ?: "")
+                            } else {
+                                "_" + namespace.split('.').last()
+                            }
+                        } else ""
                         
                         val resDir = module.file("src/main/res")
                         if (resDir.exists() && resDir.isDirectory) {
@@ -151,9 +182,17 @@ class HorizonSDKPlugin : Plugin<Project> {
                             // 处理资源目录，进行资源隔离和重命名
                             val processedCount = ResourceIsolationHelper.processResDir(
                                 resDir, 
-                                prefix, 
+                                prefix,
+                                suffix,
                                 enableResourceMd5, 
                                 moduleName = module.name,
+                                flavorName = project.findProperty("flavorName") as? String ?: "",
+                                resourcePrefixPattern = extension.resourcePrefixPattern,
+                                resourceSuffixPattern = extension.resourceSuffixPattern,
+                                namingStrategy = extension.resourceNamingStrategy,
+                                keepOriginalName = extension.keepOriginalName,
+                                md5Length = extension.resourceMd5Length,
+                                mapOutputPath = extension.resourceMapOutputPath,
                                 whiteList = whiteList
                             )
                             
