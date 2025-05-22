@@ -1,4 +1,4 @@
-// 作者：Redamancy  时间：2025-05-19
+// 作者：Redamancy  时间：2025-07-28
 // Horizon SDK Gradle 插件入口
 package com.neil.plugin
 
@@ -15,64 +15,85 @@ import com.neil.plugin.proguard.ProguardInjector
 import com.neil.plugin.resource.ResourceReferenceUpdater
 import java.io.File
 import com.neil.plugin.resource.ResourceNamingStrategy
+import com.neil.plugin.resource.ResourceRollbackHelper
+import kotlin.system.measureTimeMillis
 
 /**
  * 插件入口，自动注册Horizon SDK相关功能
- * 作者：Redamancy  时间：2025-05-23
+ * 作者：Redamancy  时间：2025-07-28
  */
 class HorizonSDKPlugin : Plugin<Project> {
     override fun apply(project: Project) {
-        // 注册DSL扩展
-        val extension = project.extensions.create("horizon", HorizonExtension::class.java)
-        
-        // 日志等级设置移动到 afterEvaluate，确保能读取到 DSL 配置
-        project.afterEvaluate {
-            // 验证配置有效性
-            extension.validate()
+        // 记录插件执行时间
+        val totalTime = measureTimeMillis {
+            // 注册DSL扩展
+            val extension = project.extensions.create("horizon", HorizonExtension::class.java)
             
-            // 设置日志级别
-            PluginLogger.logLevel = try {
-                LogLevel.valueOf(extension.logLevel.uppercase())
-            } catch (e: Exception) {
-                LogLevel.INFO
+            // 日志等级设置移动到 afterEvaluate，确保能读取到 DSL 配置
+            project.afterEvaluate {
+                // 验证配置有效性
+                extension.validate()
+                
+                // 额外验证资源回退功能配置
+                val rollbackConfigValid = ResourceRollbackHelper.validateRollbackConfig(
+                    extension.enableResourceRollback,
+                    extension.enableResourceIsolation,
+                    extension.enableResourceMd5
+                )
+                
+                if (!rollbackConfigValid) {
+                    PluginLogger.warn("资源回退功能配置无效，已自动调整配置")
+                    if (extension.enableResourceRollback) {
+                        // 如果启用了回退功能，则禁用重命名和MD5功能
+                        extension.enableResourceIsolation = false
+                        extension.enableResourceMd5 = false
+                    }
+                }
+                
+                // 设置日志级别
+                PluginLogger.logLevel = try {
+                    LogLevel.valueOf(extension.logLevel.uppercase())
+                } catch (e: Exception) {
+                    PluginLogger.warn("无效的日志级别: ${extension.logLevel}，已使用默认值 INFO")
+                    LogLevel.INFO
+                }
+                
+                // 设置日志文件
+                PluginLogger.createDefaultLogFile(project)
+                
+                PluginLogger.info("HorizonSDKPlugin 已应用，欢迎使用！")
+                PluginLogger.info("插件版本: 1.0.9")
+                PluginLogger.debug("配置信息: enableAutoRegister=${extension.enableAutoRegister}, " +
+                                "enableCodeReferenceAnalysis=${extension.enableCodeReferenceAnalysis}")
             }
             
-            // 设置日志文件
-            PluginLogger.createDefaultLogFile(project)
+            // 配置自动注册
+            setupAutoRegister(project, extension)
             
-            PluginLogger.info("HorizonSDKPlugin 已应用，欢迎使用！")
-            PluginLogger.info("插件版本: 1.0.7")
-            PluginLogger.debug("配置信息: enableAutoRegister=${extension.enableAutoRegister}, " +
-                               "enableCodeReferenceAnalysis=${extension.enableCodeReferenceAnalysis}")
-        }
-        
-        // 配置自动注册
-        setupAutoRegister(project, extension)
-        
-        // 自动注入SDK混淆规则
-        project.afterEvaluate {
-            val androidExt = project.extensions.findByName("android")
-            if (androidExt != null) {
-                ProguardInjector.injectProguardRules(project, extension)
+            // 自动注入SDK混淆规则
+            setupProguardRules(project, extension)
+    
+            // 智能结构化合并所有模块 Manifest 片段
+            setupManifestMerge(project, extension)
+    
+            // 资源处理逻辑 - 先检查是否需要回退
+            project.afterEvaluate {
+                if (extension.enableResourceRollback) {
+                    handleResourceRollback(project, extension)
+                } else {
+                    // 自动检测所有子module资源命名空间与前缀合规性，并自动重命名和前缀处理
+                    setupResourceIsolation(project, extension)
+                }
             }
+            
+            // 代码引用分析功能
+            setupCodeReferenceAnalysis(project, extension)
+            
+            // 资源引用自动更新功能
+            setupResourceReferenceUpdate(project, extension)
         }
-
-        // 智能结构化合并所有模块 Manifest 片段
-        project.afterEvaluate {
-            val androidExt = project.extensions.findByName("android")
-            if (androidExt != null) {
-                ManifestMerger.mergeModuleManifests(project)
-            }
-        }
-
-        // 自动检测所有子module资源命名空间与前缀合规性，并自动重命名和前缀处理
-        setupResourceIsolation(project, extension)
         
-        // 代码引用分析功能
-        setupCodeReferenceAnalysis(project, extension)
-        
-        // 资源引用自动更新功能
-        setupResourceReferenceUpdate(project, extension)
+        PluginLogger.info("HorizonSDKPlugin 执行完成，总耗时: ${totalTime}ms")
     }
     
     /**
@@ -80,135 +101,218 @@ class HorizonSDKPlugin : Plugin<Project> {
      */
     private fun setupAutoRegister(project: Project, extension: HorizonExtension) {
         if (extension.enableAutoRegister) {
-            // 同步DSL配置到project properties，供KSP参数读取
+            // 同步DSL配置到project properties，供HorizonServiceLoader和其他机制使用
             project.extensions.extraProperties["horizon.modulePackages"] = extension.modulePackages.joinToString(",")
             project.extensions.extraProperties["horizon.excludePackages"] = extension.excludePackages.joinToString(",")
-            project.extensions.extraProperties["horizon.registerClassName"] = extension.registerClassName
-            project.extensions.extraProperties["horizon.outputDir"] = extension.outputDir
-            project.extensions.extraProperties["horizon.generatedPackage"] = extension.generatedPackage
 
-            // 为所有KSP任务动态配置arg参数，实现DSL配置与KSP参数联动
+            // 为所有KSP任务动态配置arg参数，传递模块包名和排除包名
             project.afterEvaluate {
                 project.tasks.matching { it.name.startsWith("ksp") }.configureEach { task ->
                     task.extensions.extraProperties["kspArgs"] = mapOf(
                         "horizon.modulePackages" to extension.modulePackages.joinToString(","),
-                        "horizon.excludePackages" to extension.excludePackages.joinToString(","),
-                        "horizon.registerClassName" to extension.registerClassName,
-                        "horizon.outputDir" to extension.outputDir,
-                        "horizon.generatedPackage" to extension.generatedPackage
+                        "horizon.excludePackages" to extension.excludePackages.joinToString(",")
                     )
                 }
             }
+            
+            PluginLogger.info("自动注册功能已配置，将使用HorizonServiceLoader机制")
         }
+    }
+    
+    /**
+     * 配置混淆规则注入
+     */
+    private fun setupProguardRules(project: Project, extension: HorizonExtension) {
+        project.afterEvaluate {
+            val androidExt = project.extensions.findByName("android")
+            if (androidExt != null) {
+                try {
+                    ProguardInjector.injectProguardRules(project, extension)
+                } catch (e: Exception) {
+                    PluginLogger.error("注入混淆规则时发生错误: ${e.message}")
+                    e.printStackTrace()
+                }
+            } else {
+                PluginLogger.warn("未找到Android扩展，跳过混淆规则注入")
+            }
+        }
+    }
+    
+    /**
+     * 配置Manifest合并
+     */
+    private fun setupManifestMerge(project: Project, extension: HorizonExtension) {
+        project.afterEvaluate {
+            val androidExt = project.extensions.findByName("android")
+            if (androidExt != null) {
+                try {
+                    ManifestMerger.mergeModuleManifests(project)
+                } catch (e: Exception) {
+                    PluginLogger.error("合并Manifest时发生错误: ${e.message}")
+                    e.printStackTrace()
+                }
+            } else {
+                PluginLogger.warn("未找到Android扩展，跳过Manifest合并")
+            }
+        }
+    }
+    
+    /**
+     * 处理资源回退逻辑
+     */
+    private fun handleResourceRollback(project: Project, extension: HorizonExtension) {
+        PluginLogger.info("开始执行资源回退功能")
+        
+        // 确保资源隔离和MD5修改功能不会同时启用
+        if (extension.enableResourceIsolation || extension.enableResourceMd5) {
+            PluginLogger.warn("资源回退功能启用时，资源隔离和MD5修改功能必须关闭，已自动禁用")
+            // 在回退功能运行时，确保这些功能是关闭的
+            extension.enableResourceIsolation = false
+            extension.enableResourceMd5 = false
+        }
+        
+        // 执行资源回退
+        val allModules = project.rootProject.subprojects.filter { it != project }
+        var totalRollbackCount = 0
+        var successModuleCount = 0
+        var skippedModuleCount = 0
+        var errorModuleCount = 0
+        
+        allModules.forEach { module ->
+            val resDir = module.file("src/main/res")
+            if (resDir.exists() && resDir.isDirectory) {
+                try {
+                    // 检查是否需要强制回退
+                    val forceRollback = extension.extraArgs["force_rollback"] as? Boolean ?: false
+                    
+                    if (ResourceRollbackHelper.canRollback(resDir, forceRollback)) {
+                        val rollbackCount = ResourceRollbackHelper.rollbackResources(
+                            resDir = resDir,
+                            alsoDeleteMappingFile = extension.deleteResourceMappingAfterRollback,
+                            mapFilePath = extension.resourceMapOutputPath,
+                            forceRollback = forceRollback
+                        )
+                        totalRollbackCount += rollbackCount
+                        
+                        if (rollbackCount > 0) {
+                            PluginLogger.info("模块 ${module.name} 资源回退完成，共回退 $rollbackCount 个资源文件")
+                            successModuleCount++
+                        } else {
+                            PluginLogger.info("模块 ${module.name} 资源回退完成，但没有找到需要回退的资源")
+                            skippedModuleCount++
+                        }
+                    } else {
+                        PluginLogger.info("模块 ${module.name} 不需要执行资源回退操作")
+                        skippedModuleCount++
+                    }
+                } catch (e: Exception) {
+                    PluginLogger.error("模块 ${module.name} 资源回退失败: ${e.message}")
+                    e.printStackTrace()
+                    errorModuleCount++
+                }
+            }
+        }
+        
+        PluginLogger.info("资源回退功能执行完成，共回退 $totalRollbackCount 个资源文件，" +
+                        "$successModuleCount 个模块成功，$skippedModuleCount 个模块跳过，$errorModuleCount 个模块失败")
     }
     
     /**
      * 配置资源隔离功能
      */
     private fun setupResourceIsolation(project: Project, extension: HorizonExtension) {
-        project.afterEvaluate {
-            // 只有在明确开启资源隔离功能时才执行
-            if (extension.enableResourceIsolation) {
-                PluginLogger.info("开始执行资源隔离功能")
-                
-                // 使用扩展配置中的MD5设置，不再从project属性获取
-                val enableResourceMd5 = extension.enableResourceMd5
-                val md5StatusText = if (enableResourceMd5) "已启用" else "未启用"
-                PluginLogger.info("资源MD5计算：$md5StatusText")
-                
-                // 记录资源命名策略
-                val strategyText = when(extension.resourceNamingStrategy) {
-                    ResourceNamingStrategy.PREFIX -> "前缀模式"
-                    ResourceNamingStrategy.SUFFIX -> "后缀模式"
-                }
-                PluginLogger.info("资源命名策略：$strategyText")
-                
-                val allModules = project.rootProject.subprojects.filter { it != project }
-                allModules.forEach { module ->
+        // 只有在明确开启资源隔离功能时才执行
+        if (extension.enableResourceIsolation) {
+            PluginLogger.info("开始执行资源隔离功能")
+            
+            val enableResourceMd5 = extension.enableResourceMd5
+            PluginLogger.info("资源MD5计算：" + (if (enableResourceMd5) "已启用" else "已禁用"))
+            
+            val includeMd5InFileName = extension.includeMd5InFileName
+            PluginLogger.info("资源MD5添加到文件名：" + (if (enableResourceMd5 && includeMd5InFileName) "是" else "否"))
+            
+            val namingStrategy = extension.resourceNamingStrategy
+            PluginLogger.info("资源命名策略：" + (if (namingStrategy == ResourceNamingStrategy.PREFIX) "前缀模式" else "后缀模式"))
+            
+            // 记录是否强制重新处理资源
+            val forceReprocessText = if (extension.forceReprocessResources) "是" else "否"
+            PluginLogger.info("强制重新处理资源：$forceReprocessText")
+            
+            val allModules = project.rootProject.subprojects.filter { it != project }
+            var successCount = 0
+            var skippedCount = 0
+            var errorCount = 0
+            
+            allModules.forEach { module ->
+                try {
                     val buildGradle = module.file("build.gradle")
                     val buildGradleKts = module.file("build.gradle.kts")
                     var namespace: String? = null
+                    
+                    // 尝试从build.gradle获取namespace
                     if (buildGradle.exists()) {
                         val text = buildGradle.readText()
                         namespace = Regex("""namespace ['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
-                    } else if (buildGradleKts.exists()) {
+                    } 
+                    // 如果build.gradle不存在或未找到namespace，则尝试从build.gradle.kts获取
+                    else if (buildGradleKts.exists()) {
                         val text = buildGradleKts.readText()
                         namespace = Regex("""namespace ?= ?['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
                     }
+                    
                     if (namespace != null) {
                         // 处理资源前缀/后缀模式
                         val namingStrategy = extension.resourceNamingStrategy
-                        
-                        // 前缀模式处理
-                        val prefix = if (namingStrategy == ResourceNamingStrategy.PREFIX) {
-                            val prefixPattern = extension.resourcePrefixPattern
-                            if (prefixPattern != null) {
-                                prefixPattern
-                                    .replace("{module}", module.name)
-                                    .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
-                                    .replace("{package}", namespace.split('.').last())
-                                    .replace("{variant}", project.findProperty("variantName") as? String ?: "")
-                                    .replace("{buildType}", project.findProperty("buildType") as? String ?: "")
-                            } else {
-                                namespace.split('.').last() + "_"
-                            }
-                        } else ""
-                        
-                        // 后缀模式处理
-                        val suffix = if (namingStrategy == ResourceNamingStrategy.SUFFIX) {
-                            val suffixPattern = extension.resourceSuffixPattern
-                            if (suffixPattern != null) {
-                                suffixPattern
-                                    .replace("{module}", module.name)
-                                    .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
-                                    .replace("{package}", namespace.split('.').last())
-                                    .replace("{variant}", project.findProperty("variantName") as? String ?: "")
-                                    .replace("{buildType}", project.findProperty("buildType") as? String ?: "")
-                            } else {
-                                "_" + namespace.split('.').last()
-                            }
-                        } else ""
-                        
                         val resDir = module.file("src/main/res")
+                        
                         if (resDir.exists() && resDir.isDirectory) {
-                            // 读取白名单配置
-                            val whiteList = ResourceIsolationHelper.loadWhiteListFromConfig(
-                                extension.resourceWhiteList, module.projectDir
-                            )
-                            if (whiteList.isNotEmpty()) {
-                                PluginLogger.info("模块 ${module.name} 使用资源白名单：${whiteList.size}条规则")
-                            }
-                            
-                            // 处理资源目录，进行资源隔离和重命名
-                            val processedCount = ResourceIsolationHelper.processResDir(
-                                resDir, 
-                                prefix,
-                                suffix,
-                                enableResourceMd5, 
+                            val isolationResult = ResourceIsolationHelper.processResDir(
+                                resDir = resDir, 
+                                prefix = namespace,
+                                suffix = "",
+                                enableMd5 = extension.enableResourceMd5,
                                 moduleName = module.name,
                                 flavorName = project.findProperty("flavorName") as? String ?: "",
                                 resourcePrefixPattern = extension.resourcePrefixPattern,
                                 resourceSuffixPattern = extension.resourceSuffixPattern,
-                                namingStrategy = extension.resourceNamingStrategy,
+                                namingStrategy = namingStrategy,
                                 keepOriginalName = extension.keepOriginalName,
                                 md5Length = extension.resourceMd5Length,
                                 mapOutputPath = extension.resourceMapOutputPath,
-                                whiteList = whiteList
+                                whiteList = ResourceIsolationHelper.loadWhiteListFromConfig(
+                                    extension.resourceWhiteList, module.projectDir
+                                ),
+                                forceReprocess = extension.forceReprocessResources ?: false,
+                                includeMd5InFileName = extension.includeMd5InFileName
                             )
                             
-                            if (processedCount > 0) {
-                                PluginLogger.info("模块 ${module.name} 资源隔离处理完成，共处理 $processedCount 个资源文件")
+                            // 检查处理结果
+                            if (isolationResult > 0) {
+                                PluginLogger.info("模块 ${module.name} 资源隔离完成，处理了 ${isolationResult} 个资源")
+                                successCount++
+                            } else if (isolationResult == 0) {
+                                PluginLogger.info("模块 ${module.name} 资源隔离完成，没有需要处理的资源")
+                                skippedCount++
                             } else {
-                                PluginLogger.info("模块 ${module.name} 资源已符合隔离规范，无需处理")
+                                PluginLogger.warn("模块 ${module.name} 资源隔离失败")
+                                errorCount++
                             }
+                        } else {
+                            PluginLogger.info("模块 ${module.name} 没有res目录，跳过资源隔离")
+                            skippedCount++
                         }
                     } else {
-                        PluginLogger.warn("资源隔离检测：未检测到模块${module.name}的namespace，建议在build.gradle中声明namespace！")
+                        PluginLogger.warn("模块 ${module.name} 未找到namespace配置，跳过资源隔离")
+                        skippedCount++
                     }
+                } catch (e: Exception) {
+                    PluginLogger.error("处理模块 ${module.name} 资源时发生异常: ${e.message}")
+                    e.printStackTrace()
+                    errorCount++
                 }
-                
-                PluginLogger.info("资源隔离功能执行完成")
             }
+            
+            PluginLogger.info("资源隔离功能执行完成：$successCount 个模块成功，$skippedCount 个模块跳过，$errorCount 个模块失败")
         }
     }
     
@@ -217,71 +321,113 @@ class HorizonSDKPlugin : Plugin<Project> {
      */
     private fun setupCodeReferenceAnalysis(project: Project, extension: HorizonExtension) {
         project.afterEvaluate {
+            // 如果启用了代码引用分析功能
             if (extension.enableCodeReferenceAnalysis) {
-                PluginLogger.info("开始代码引用分析")
-                val allModules = project.rootProject.subprojects.filter { it != project }
-                
-                allModules.forEach { module ->
-                    try {
-                        val srcDirs = listOf(
-                            module.file("src/main/java"),
-                            module.file("src/main/kotlin")
-                        ).filter { it.exists() && it.isDirectory }
-                        
-                        if (srcDirs.isNotEmpty()) {
-                            // 加载白名单配置
-                            val whiteList = CodeReferenceHelper.loadCodeReferenceWhiteList(
-                                extension.codeReferenceWhiteList,
-                                module.projectDir
-                            )
+                try {
+                    PluginLogger.info("开始执行代码引用分析")
+                    
+                    // 配置代码引用分析任务
+                    val taskName = "analyzeCodeReferences"
+                    project.tasks.register(taskName) { task ->
+                        task.doLast {
+                            // 收集所有子模块的源代码目录
+                            val allModules = project.rootProject.subprojects.filter { it != project }
+                            val sourceDirs = mutableListOf<File>()
                             
-                            srcDirs.forEach { srcDir ->
-                                val referenceMap = CodeReferenceHelper.analyzeCodeReferences(
-                                    srcDir,
-                                    module.name,
-                                    whiteList
-                                )
-                                
-                                if (extension.generateDependencyGraph && referenceMap.isNotEmpty()) {
-                                    val graphFile = File(
-                                        module.buildDir,
-                                        "reports/code-references/${module.name}_dependency_graph.dot"
-                                    )
-                                    graphFile.parentFile.mkdirs()
-                                    CodeReferenceHelper.generateDependencyGraph(
-                                        referenceMap,
-                                        graphFile,
-                                        simplifyNames = true
-                                    )
+                            allModules.forEach { module ->
+                                val srcDir = module.file("src/main/java")
+                                if (srcDir.exists()) {
+                                    sourceDirs.add(srcDir)
                                 }
                                 
-                                if (extension.detectUnusedClasses && referenceMap.isNotEmpty()) {
-                                    val unusedClasses = CodeReferenceHelper.findUnusedClasses(
-                                        referenceMap,
-                                        whiteList
-                                    )
-                                    if (unusedClasses.isNotEmpty()) {
-                                        val unusedFile = File(
-                                            module.buildDir,
-                                            "reports/code-references/${module.name}_unused_classes.txt"
-                                        )
-                                        unusedFile.parentFile.mkdirs()
-                                        unusedFile.writeText(unusedClasses.joinToString("\n"))
-                                        PluginLogger.info("模块 ${module.name} 发现 ${unusedClasses.size} 个未使用的类，详见: ${unusedFile.absolutePath}")
-                                    } else {
-                                        PluginLogger.info("模块 ${module.name} 未发现未使用的类，代码引用良好")
-                                    }
+                                val kotlinDir = module.file("src/main/kotlin")
+                                if (kotlinDir.exists()) {
+                                    sourceDirs.add(kotlinDir)
                                 }
                             }
-                        } else {
-                            PluginLogger.warn("模块 ${module.name} 未找到源代码目录，跳过代码引用分析")
+                            
+                            // 执行代码引用分析
+                            allModules.forEach { module ->
+                                try {
+                                    val srcDirs = listOf(
+                                        module.file("src/main/java"),
+                                        module.file("src/main/kotlin")
+                                    ).filter { it.exists() && it.isDirectory }
+                                    
+                                    if (srcDirs.isNotEmpty()) {
+                                        // 加载白名单配置
+                                        val whiteList = CodeReferenceHelper.loadCodeReferenceWhiteList(
+                                            extension.codeReferenceWhiteList,
+                                            module.projectDir
+                                        )
+                                        
+                                        srcDirs.forEach { srcDir ->
+                                            val referenceMap = CodeReferenceHelper.analyzeCodeReferences(
+                                                srcDir,
+                                                module.name,
+                                                whiteList
+                                            )
+                                            
+                                            if (extension.generateDependencyGraph && referenceMap.isNotEmpty()) {
+                                                val graphFile = File(
+                                                    module.buildDir,
+                                                    "reports/code-references/${module.name}_dependency_graph.dot"
+                                                )
+                                                graphFile.parentFile.mkdirs()
+                                                CodeReferenceHelper.generateDependencyGraph(
+                                                    referenceMap,
+                                                    graphFile,
+                                                    simplifyNames = true
+                                                )
+                                            }
+                                            
+                                            if (extension.detectUnusedClasses && referenceMap.isNotEmpty()) {
+                                                val unusedClasses = CodeReferenceHelper.findUnusedClasses(
+                                                    referenceMap,
+                                                    whiteList
+                                                )
+                                                if (unusedClasses.isNotEmpty()) {
+                                                    val unusedFile = File(
+                                                        module.buildDir,
+                                                        "reports/code-references/${module.name}_unused_classes.txt"
+                                                    )
+                                                    unusedFile.parentFile.mkdirs()
+                                                    unusedFile.writeText(unusedClasses.joinToString("\n"))
+                                                    PluginLogger.info("模块 ${module.name} 发现 ${unusedClasses.size} 个未使用的类，详见: ${unusedFile.absolutePath}")
+                                                } else {
+                                                    PluginLogger.info("模块 ${module.name} 未发现未使用的类，代码引用良好")
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        PluginLogger.warn("模块 ${module.name} 未找到源代码目录，跳过代码引用分析")
+                                    }
+                                } catch (e: Exception) {
+                                    PluginLogger.warn("模块 ${module.name} 代码引用分析失败: ${e.message}")
+                                    e.printStackTrace()
+                                }
+                            }
                         }
-                    } catch (e: Exception) {
-                        PluginLogger.warn("模块 ${module.name} 代码引用分析失败: ${e.message}")
-                        e.printStackTrace()
                     }
+                    
+                    // 自动执行分析任务
+                    project.afterEvaluate {
+                        try {
+                            // 手动配置任务运行
+                            val task = project.tasks.findByName(taskName)
+                            if (task != null) {
+                                project.gradle.buildFinished {
+                                    PluginLogger.info("执行代码引用分析任务")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            PluginLogger.error("自动执行任务失败: ${e.message}")
+                        }
+                    }
+                } catch (e: Exception) {
+                    PluginLogger.error("代码引用分析失败: ${e.message}")
+                    e.printStackTrace()
                 }
-                PluginLogger.info("代码引用分析完成")
             }
         }
     }
@@ -291,89 +437,148 @@ class HorizonSDKPlugin : Plugin<Project> {
      */
     private fun setupResourceReferenceUpdate(project: Project, extension: HorizonExtension) {
         project.afterEvaluate {
+            // 如果启用了资源引用自动更新
             if (extension.enableResourceReferenceUpdate) {
-                PluginLogger.info("开始资源引用自动更新")
-                
-                // 加载白名单
-                val whiteList = ResourceReferenceUpdater.loadWhiteList(project, extension.resourceReferenceWhiteList)
-                
-                val allModules = project.rootProject.subprojects.filter { it != project }
-                val modulePrefixMap = mutableMapOf<String, String>()
-                
-                // 收集所有模块的资源前缀
-                allModules.forEach { module ->
-                    val buildGradle = module.file("build.gradle")
-                    val buildGradleKts = module.file("build.gradle.kts")
-                    var namespace: String? = null
+                try {
+                    PluginLogger.info("开始执行资源引用自动更新")
                     
-                    if (buildGradle.exists()) {
-                        val text = buildGradle.readText()
-                        namespace = Regex("""namespace ['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
-                    } else if (buildGradleKts.exists()) {
-                        val text = buildGradleKts.readText()
-                        namespace = Regex("""namespace ?= ?['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
-                    }
-                    
-                    if (namespace != null) {
-                        // 处理资源前缀模式
-                        val prefixPattern = extension.resourcePrefixPattern
-                        val prefix = if (prefixPattern != null) {
-                            prefixPattern
-                                .replace("{module}", module.name)
-                                .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
-                        } else {
-                            namespace.split('.').last() + "_"
+                    // 注册资源引用更新任务
+                    val taskName = "updateResourceReferences"
+                    project.tasks.register(taskName) { task ->
+                        task.doLast {
+                            // 收集所有子模块的源代码目录和资源目录
+                            val allModules = project.rootProject.subprojects.filter { it != project }
+                            val sourceAndResDirs = mutableListOf<Pair<File, File>>()
+                            
+                            allModules.forEach { module ->
+                                val srcDir = module.file("src/main/java")
+                                val kotlinDir = module.file("src/main/kotlin")
+                                val resDir = module.file("src/main/res")
+                                
+                                if (srcDir.exists() && resDir.exists()) {
+                                    sourceAndResDirs.add(Pair(srcDir, resDir))
+                                }
+                                
+                                if (kotlinDir.exists() && resDir.exists()) {
+                                    sourceAndResDirs.add(Pair(kotlinDir, resDir))
+                                }
+                            }
+                            
+                            // 更新资源引用
+                            var updateCount = 0
+                            
+                            // 更新当前项目的资源引用
+                            val appPrefix = if (extension.resourcePrefixPattern != null) {
+                                extension.resourcePrefixPattern!!
+                                    .replace("{module}", project.name)
+                                    .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
+                            } else {
+                                val namespace = project.findProperty("android.namespace") as? String
+                                if (namespace != null) {
+                                    namespace.split('.').last() + "_"
+                                } else {
+                                    project.name + "_"
+                                }
+                            }
+                            
+                            updateCount += ResourceReferenceUpdater.updateResourceReferences(
+                                project,
+                                project.name,
+                                appPrefix,
+                                extension.resourceReferenceDryRun,
+                                loadWhiteList(extension.resourceReferenceWhiteList),
+                                extension.forceUpdatePrefixedResources
+                            )
+                            
+                            // 更新每个模块的资源引用
+                            allModules.forEach { module ->
+                                val buildGradle = module.file("build.gradle")
+                                val buildGradleKts = module.file("build.gradle.kts")
+                                var namespace: String? = null
+                                
+                                if (buildGradle.exists()) {
+                                    val text = buildGradle.readText()
+                                    namespace = Regex("""namespace ['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
+                                } else if (buildGradleKts.exists()) {
+                                    val text = buildGradleKts.readText()
+                                    namespace = Regex("""namespace ?= ?['"]([\w.]+)['"]""").find(text)?.groupValues?.getOrNull(1)
+                                }
+                                
+                                if (namespace != null) {
+                                    // 处理资源前缀模式
+                                    val prefixPattern = extension.resourcePrefixPattern
+                                    val modulePrefix = if (prefixPattern != null) {
+                                        prefixPattern
+                                            .replace("{module}", module.name)
+                                            .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
+                                    } else {
+                                        namespace.split('.').last() + "_"
+                                    }
+                                    
+                                    updateCount += ResourceReferenceUpdater.updateResourceReferences(
+                                        project,
+                                        module.name,
+                                        modulePrefix,
+                                        extension.resourceReferenceDryRun,
+                                        loadWhiteList(extension.resourceReferenceWhiteList),
+                                        extension.forceUpdatePrefixedResources
+                                    )
+                                }
+                            }
+                            
+                            PluginLogger.info("资源引用更新完成，共更新 $updateCount 处引用")
                         }
-                        
-                        modulePrefixMap[module.name] = prefix
                     }
-                }
-                
-                // 更新当前项目的资源引用
-                val appPrefix = if (extension.resourcePrefixPattern != null) {
-                    extension.resourcePrefixPattern!!
-                        .replace("{module}", project.name)
-                        .replace("{flavor}", project.findProperty("flavorName") as? String ?: "")
-                } else {
-                    val namespace = project.findProperty("android.namespace") as? String
-                    if (namespace != null) {
-                        namespace.split('.').last() + "_"
-                    } else {
-                        project.name + "_"
+                    
+                    // 自动执行更新任务
+                    project.afterEvaluate {
+                        try {
+                            // 手动配置任务运行
+                            val task = project.tasks.findByName(taskName)
+                            if (task != null) {
+                                project.gradle.buildFinished {
+                                    PluginLogger.info("执行资源引用更新任务")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            PluginLogger.error("自动执行任务失败: ${e.message}")
+                        }
                     }
-                }
-                
-                val dryRunMode = extension.resourceReferenceDryRun
-                val dryRunMsg = if (dryRunMode) "(试运行模式)" else ""
-                PluginLogger.info("资源引用自动更新$dryRunMsg - 当前项目前缀：$appPrefix")
-                
-                val updatedFiles = ResourceReferenceUpdater.updateResourceReferences(
-                    project,
-                    project.name,
-                    appPrefix,
-                    dryRunMode,
-                    whiteList,
-                    extension.forceUpdatePrefixedResources
-                )
-                
-                // 更新所有模块的资源引用
-                PluginLogger.info("资源引用自动更新$dryRunMsg - 将更新 ${modulePrefixMap.size} 个子模块")
-                
-                val totalUpdated = updatedFiles + ResourceReferenceUpdater.updateAllModulesResourceReferences(
-                    project,
-                    modulePrefixMap,
-                    dryRunMode,
-                    whiteList,
-                    extension.forceUpdatePrefixedResources
-                )
-                
-                if (dryRunMode) {
-                    PluginLogger.info("资源引用自动更新(试运行模式)完成，共发现 $totalUpdated 个需要更新的文件")
-                    PluginLogger.info("试运行模式不会实际修改文件，如需应用更改，请设置 resourceReferenceDryRun = false")
-                } else {
-                    PluginLogger.info("资源引用自动更新完成，共更新 $totalUpdated 个文件")
+                } catch (e: Exception) {
+                    PluginLogger.error("资源引用自动更新失败: ${e.message}")
+                    e.printStackTrace()
                 }
             }
         }
+    }
+
+    /**
+     * 从配置加载白名单
+     */
+    private fun loadWhiteList(whiteListConfig: Any?): Set<String> {
+        if (whiteListConfig == null) return emptySet()
+        
+        val whiteList = mutableSetOf<String>()
+        
+        when (whiteListConfig) {
+            is List<*> -> {
+                whiteListConfig.filterIsInstance<String>().forEach { 
+                    if (it.contains(":")) {
+                        whiteList.add(it) 
+                    } else {
+                        whiteList.add("*:$it")
+                    }
+                }
+            }
+            is String -> {
+                if (whiteListConfig.contains(":")) {
+                    whiteList.add(whiteListConfig)
+                } else {
+                    whiteList.add("*:$whiteListConfig")
+                }
+            }
+        }
+        
+        return whiteList
     }
 }

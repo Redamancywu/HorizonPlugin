@@ -19,6 +19,18 @@ class ResourceReferenceUpdater {
             "R\\.(id|layout|drawable|string|color|dimen|raw|menu|anim|animator|xml|plurals|array|font|navigation|style|styleable|bool|integer|interpolator|transition|mipmap)\\.(\\w+)"
         )
         
+        // 特殊方法调用中的资源引用模式
+        private val METHOD_RESOURCE_PATTERNS = listOf(
+            // findViewById(R.id.xxx)
+            Pattern.compile("findViewById\\(\\s*R\\.(id)\\.(\\w+)\\s*\\)"),
+            // setContentView(R.layout.xxx)
+            Pattern.compile("setContentView\\(\\s*R\\.(layout)\\.(\\w+)\\s*\\)"),
+            // inflate(R.layout.xxx, ...)
+            Pattern.compile("inflate\\(\\s*R\\.(layout)\\.(\\w+)\\s*,"),
+            // getIdentifier("xxx", "layout", ...)
+            Pattern.compile("getIdentifier\\(\\s*[\"'](\\w+)[\"']\\s*,\\s*[\"'](id|layout|drawable|string|color|dimen|raw|menu|anim|animator|xml|plurals|array)[\"']")
+        )
+        
         /**
          * 更新指定模块中的资源引用
          * @param project Gradle项目
@@ -106,6 +118,8 @@ class ResourceReferenceUpdater {
                 .forEach { file ->
                     try {
                         val content = file.readText()
+                        
+                        // 先用主要正则表达式处理标准的R.xxx.yyy形式
                         val result = updateResourceReferencesInFile(
                             content, 
                             resourcePrefix,
@@ -115,15 +129,26 @@ class ResourceReferenceUpdater {
                         
                         totalReferences += result.second
                         
-                        if (result.third > 0) {
+                        // 然后处理特殊的方法调用形式
+                        val methodResult = updateMethodResourceReferencesInFile(
+                            result.first,
+                            resourcePrefix,
+                            whiteList,
+                            forceUpdatePrefixed
+                        )
+                        
+                        totalReferences += methodResult.second
+                        val totalUpdatedReferences = result.third + methodResult.third
+                        
+                        if (totalUpdatedReferences > 0) {
                             if (!dryRun) {
-                                file.writeText(result.first)
-                                PluginLogger.debug("更新文件 ${file.absolutePath} 中的资源引用：${result.third}个")
+                                file.writeText(methodResult.first)
+                                PluginLogger.debug("更新文件 ${file.absolutePath} 中的资源引用：${totalUpdatedReferences}个")
                             } else {
-                                PluginLogger.debug("试运行：需要更新文件 ${file.absolutePath} 中的资源引用：${result.third}个")
+                                PluginLogger.debug("试运行：需要更新文件 ${file.absolutePath} 中的资源引用：${totalUpdatedReferences}个")
                             }
                             updatedFiles++
-                            updatedReferences += result.third
+                            updatedReferences += totalUpdatedReferences
                         }
                     } catch (e: IOException) {
                         PluginLogger.error("处理文件 ${file.absolutePath} 时出错: ${e.message}")
@@ -196,6 +221,123 @@ class ResourceReferenceUpdater {
             
             matcher.appendTail(buffer)
             return Triple(buffer.toString(), totalCount, updatedCount)
+        }
+        
+        /**
+         * 更新方法调用中的资源引用
+         * @return Triple(更新后的内容, 总引用数, 更新的引用数)
+         */
+        private fun updateMethodResourceReferencesInFile(
+            content: String,
+            resourcePrefix: String,
+            whiteList: Set<String>,
+            forceUpdatePrefixed: Boolean
+        ): Triple<String, Int, Int> {
+            var resultContent = content
+            var totalCount = 0
+            var updatedCount = 0
+            
+            METHOD_RESOURCE_PATTERNS.forEach { pattern ->
+                val matcher = pattern.matcher(resultContent)
+                val buffer = StringBuffer()
+                
+                while (matcher.find()) {
+                    totalCount++
+                    
+                    // 处理不同类型的方法调用模式
+                    if (pattern.pattern().startsWith("getIdentifier")) {
+                        // 特殊处理getIdentifier("name", "type", ...)
+                        val resName = matcher.group(1)
+                        val resType = matcher.group(2)
+                        val originalRef = matcher.group(0)
+                        
+                        // 白名单检查和前缀处理与普通资源引用相同
+                        val resKey = "$resType:$resName"
+                        if (whiteList.contains(resKey) || whiteList.contains("*:$resName") || 
+                            whiteList.contains("$resType:*") || whiteList.contains(resName)) {
+                            matcher.appendReplacement(buffer, originalRef)
+                            continue
+                        }
+                        
+                        if (resName.startsWith(resourcePrefix) && !forceUpdatePrefixed) {
+                            matcher.appendReplacement(buffer, originalRef)
+                            continue
+                        }
+                        
+                        // 如果已有其他前缀且不强制更新，跳过
+                        if (resName.contains("_") && !forceUpdatePrefixed) {
+                            val prefix = resName.substringBefore("_") + "_"
+                            if (prefix != resourcePrefix) {
+                                matcher.appendReplacement(buffer, originalRef)
+                                continue
+                            }
+                        }
+                        
+                        // 处理资源名称
+                        val nameWithoutPrefix = if (forceUpdatePrefixed && resName.contains("_")) {
+                            resName.substringAfter("_")
+                        } else {
+                            resName
+                        }
+                        
+                        // 构建新的引用格式
+                        val newName = "${resourcePrefix}$nameWithoutPrefix"
+                        val newRef = originalRef.replace("\"$resName\"", "\"$newName\"")
+                        matcher.appendReplacement(buffer, newRef)
+                        updatedCount++
+                        
+                        PluginLogger.debug("替换getIdentifier引用: $originalRef -> $newRef")
+                    } else {
+                        // 标准方法调用模式 (findViewById, setContentView等)
+                        val resType = matcher.group(1)
+                        val resName = matcher.group(2)
+                        val originalRef = matcher.group(0)
+                        
+                        // 白名单检查
+                        val resKey = "$resType:$resName"
+                        if (whiteList.contains(resKey) || whiteList.contains("*:$resName") || 
+                            whiteList.contains("$resType:*") || whiteList.contains(resName)) {
+                            matcher.appendReplacement(buffer, originalRef)
+                            continue
+                        }
+                        
+                        // 前缀检查
+                        if (resName.startsWith(resourcePrefix) && !forceUpdatePrefixed) {
+                            matcher.appendReplacement(buffer, originalRef)
+                            continue
+                        }
+                        
+                        // 如果已有其他前缀且不强制更新，跳过
+                        if (resName.contains("_") && !forceUpdatePrefixed) {
+                            val prefix = resName.substringBefore("_") + "_"
+                            if (prefix != resourcePrefix) {
+                                matcher.appendReplacement(buffer, originalRef)
+                                continue
+                            }
+                        }
+                        
+                        // 处理资源名
+                        val nameWithoutPrefix = if (forceUpdatePrefixed && resName.contains("_")) {
+                            resName.substringAfter("_")
+                        } else {
+                            resName
+                        }
+                        
+                        // 构建新的引用
+                        val newResRef = "R.$resType.${resourcePrefix}$nameWithoutPrefix"
+                        val newRef = originalRef.replace("R.$resType.$resName", newResRef)
+                        matcher.appendReplacement(buffer, newRef)
+                        updatedCount++
+                        
+                        PluginLogger.debug("替换方法调用中的资源引用: $originalRef -> $newRef")
+                    }
+                }
+                
+                matcher.appendTail(buffer)
+                resultContent = buffer.toString()
+            }
+            
+            return Triple(resultContent, totalCount, updatedCount)
         }
         
         /**

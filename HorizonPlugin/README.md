@@ -1,5 +1,205 @@
 # HorizonSDKPlugin
 
+## 最新优化更新 (v1.0.9)
+
+> 本次更新专注于性能和稳定性优化，加强了代码结构和兼容性，解决了多个潜在问题，确保插件能够更高效、更稳定地运行。
+
+### 重要性能与稳定性优化
+
+1. **HorizonServiceLoader性能提升**
+   - 添加接口继承关系缓存，提高类型兼容性检测效率
+   - 实现类缓存机制，减少反射操作，提高模块加载速度
+   - 添加模块优先级机制，支持通过`@AutoRegisterModule`注解指定优先级
+   - 优化类扫描算法，提高启动性能
+   - 增强线程同步机制，使用CountDownLatch替代轮询等待
+
+2. **资源处理优化**
+   - 解决资源重复处理问题：添加资源处理标记文件，确保资源只被重命名一次
+   - 新增`forceReprocessResources`配置项，允许用户控制是否强制重新处理资源
+   - 优化资源重命名流程，提高性能
+   - 添加资源映射持久化，确保重启后能保持一致性
+   - 优化处理XML文件引用的方法，提高并行处理效率
+
+3. **循环依赖检测**
+   - 添加模块间循环依赖检测，避免因循环依赖导致的死锁
+
+### 代码结构优化与问题修复
+
+1. **重构与修复**
+   - 修复ResourceIsolationHelper中的方法调用参数不匹配问题
+   - 修复代码引用分析和资源引用更新功能中的参数错误 
+   - 修复when表达式不完整的问题，确保处理所有枚举值
+   - 增强资源回退功能的错误处理
+   - 修改任务执行机制，使用更安全的方法配置任务依赖
+   - 更新XML处理方式，避免使用实验性的内联lambda功能
+
+2. **兼容性改进**
+   - 增加对不同Gradle版本的兼容性支持
+   - 加强与Android Gradle Plugin的协同工作能力
+   - 优化处理XML资源的能力和稳定性
+
+### 使用方式
+
+在项目build.gradle.kts文件中添加以下配置：
+
+```kotlin
+horizon {
+    // 资源处理配置
+    enableResourceIsolation = true
+    resourceNamingStrategy = ResourceNamingStrategy.PREFIX
+    resourcePrefixPattern = "{package}_"
+    enableResourceMd5 = true
+    forceReprocessResources = false  // 设置为true可强制重新处理资源
+
+    // 模块注解使用
+    enableAutoRegister = true
+}
+```
+
+模块使用优先级：
+
+```kotlin
+@AutoRegisterModule(
+    type = "user",
+    desc = "用户模块",
+    priority = 10  // 优先级，数值越大优先级越高
+)
+class UserModule : BaseModel {
+    // 实现
+}
+```
+
+## 最新重命名更新 (v1.0.8)
+
+> 本次更新将ServiceLoader重命名为HorizonServiceLoader，避免与Java标准库的ServiceLoader混淆，提高开发体验。
+
+### 重要变更
+
+1. **重命名ServiceLoader**：将自定义的ServiceLoader类重命名为HorizonServiceLoader，避免与Java标准库的java.util.ServiceLoader混淆
+2. **保持功能一致**：所有功能保持不变，只是类名进行了更改
+3. **更新文档和示例**：更新了所有示例代码，使用HorizonServiceLoader替代ServiceLoader
+
+### 新的使用方式
+
+在功能模块中使用注解：
+```kotlin
+import com.neil.plugin.autoregister.AutoRegisterModule
+
+@AutoRegisterModule(type = "user", desc = "用户模块")
+class UserModule {
+    fun login(username: String) {
+        // 登录逻辑
+    }
+}
+```
+
+在核心模块中使用HorizonServiceLoader：
+```kotlin
+import com.neil.plugin.autoregister.HorizonServiceLoader
+
+// 初始化
+HorizonServiceLoader.init(context)
+
+// 获取所有用户模块
+val userModules = HorizonServiceLoader.loadByType<Any>("user")
+
+// 通过反射调用方法
+userModules.forEach { module ->
+    try {
+        val method = module.javaClass.getMethod("login", String::class.java)
+        method.invoke(module, "username")
+    } catch (e: Exception) {
+        // 处理异常
+    }
+}
+```
+
+通过接口方式使用更加类型安全：
+```kotlin
+// 定义共同接口
+interface IUserModule {
+    fun login(username: String)
+}
+
+// 实现接口
+@AutoRegisterModule(type = "user")
+class UserModule : IUserModule {
+    override fun login(username: String) {
+        // 登录逻辑
+    }
+}
+
+// 使用HorizonServiceLoader获取接口实现
+val userModules = HorizonServiceLoader.load<IUserModule>()
+userModules.forEach { it.login("username") }
+```
+
+## v1.0.7 更新优化
+
+> 本次更新优化了插件架构，简化了自动注册机制，提高了性能和稳定性。
+
+### 重要变更
+
+1. **移除代码生成功能**：不再生成注册类，避免了KSP处理和代码生成的复杂性
+2. **增强ServiceLoader功能**：现在可以直接使用ServiceLoader类发现和管理模块
+3. **保留自动注册能力**：仍然支持通过@AutoRegisterModule注解自动注册模块
+4. **简化配置选项**：移除了registerClassName和generatedPackage配置，保留enableAutoRegister
+
+### 新的使用方式
+
+在功能模块中使用注解：
+```kotlin
+import com.neil.plugin.autoregister.AutoRegisterModule
+
+@AutoRegisterModule(type = "user", desc = "用户模块")
+class UserModule {
+    fun login(username: String) {
+        // 登录逻辑
+    }
+}
+```
+
+在核心模块中使用HorizonServiceLoader：
+```kotlin
+import com.neil.plugin.autoregister.HorizonServiceLoader
+
+// 初始化
+HorizonServiceLoader.init(context)
+
+// 获取所有用户模块
+val userModules = HorizonServiceLoader.loadByType<Any>("user")
+
+// 通过反射调用方法
+userModules.forEach { module ->
+    try {
+        val method = module.javaClass.getMethod("login", String::class.java)
+        method.invoke(module, "username")
+    } catch (e: Exception) {
+        // 处理异常
+    }
+}
+```
+
+通过接口方式使用更加类型安全：
+```kotlin
+// 定义共同接口
+interface IUserModule {
+    fun login(username: String)
+}
+
+// 实现接口
+@AutoRegisterModule(type = "user")
+class UserModule : IUserModule {
+    override fun login(username: String) {
+        // 登录逻辑
+    }
+}
+
+// 使用HorizonServiceLoader获取接口实现
+val userModules = HorizonServiceLoader.load<IUserModule>()
+userModules.forEach { it.login("username") }
+```
+
 ## v1.0.5 更新优化
 
 > 本次更新重构代码结构，增强代码引用分析，改进日志系统，提高插件健壮性和易用性。更多详细信息请查看 [CHANGELOG.md](CHANGELOG.md)。
@@ -1029,7 +1229,7 @@ HorizonSDKPlugin 是一款专为 Android SDK 多模块开发设计的通用 Grad
 - **混淆规则自动注入**：自动合并 proguard 规则，支持追加自定义 keep。
 - **Manifest 智能合并**：自动结构化合并多模块 Manifest 片段，冲突检测与顺序可控。
 - **资源隔离与自动重命名**：自动检测并重命名资源，支持前缀/MD5，防止冲突。
-- **日志系统封装**：支持日志等级、格式化、可选文件输出。
+- **日志系统封装**：支持日志等级、格式化、可选输出到文件。
 
 ---
 

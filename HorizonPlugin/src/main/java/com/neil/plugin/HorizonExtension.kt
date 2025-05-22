@@ -5,7 +5,9 @@ package com.neil.plugin
 import com.neil.plugin.logger.LogLevel
 import com.neil.plugin.logger.PluginLogger
 import com.neil.plugin.resource.ResourceNamingStrategy
+import com.neil.plugin.resource.SpecialResourceProcessor
 import org.gradle.api.Project
+import org.gradle.api.Action
 import java.io.File
 
 /**
@@ -22,20 +24,11 @@ open class HorizonExtension {
     /** 需要排除的包名列表 */
     var excludePackages: MutableList<String> = mutableListOf()
 
-    /** 生成的注册类名，默认 ModuleRegistry */
-    var registerClassName: String = "ModuleRegistry"
-
-    /** 生成代码输出目录（可选，默认 build/generated/horizon） */
-    var outputDir: String = "build/generated/horizon"
-
     /** 日志级别，默认INFO，可选DEBUG/INFO/WARN/ERROR */
     var logLevel: String = "INFO"
 
     /** 额外参数，便于后续扩展 */
     var extraArgs: MutableMap<String, Any> = mutableMapOf()
-
-    /** 生成注册类的包名，默认 com.neil.plugin.autoregister */
-    var generatedPackage: String = "com.neil.plugin.autoregister"
 
     /** 追加自定义混淆规则 */
     var proguardRules: MutableList<String> = mutableListOf()
@@ -100,6 +93,23 @@ open class HorizonExtension {
     var resourceMapOutputPath: String = "build/reports/resources/resource_rename_map.json"
     
     /**
+     * 是否启用资源回退功能
+     * 默认为false，设置为true时会回退之前的资源重命名和MD5修改
+     * 注意：enableResourceRollback=true时，enableResourceIsolation和enableResourceMd5必须为false
+     * 回退功能会恢复之前通过ResourceIsolationHelper执行的资源重命名和MD5修改的原始状态
+     * 作者：Redamancy  时间：2025-06-02
+     */
+    var enableResourceRollback: Boolean = false
+    
+    /**
+     * 资源回退后是否同时删除映射文件
+     * 默认为true
+     * 当设置为false时，保留映射文件以便后续参考
+     * 作者：Redamancy  时间：2025-06-02
+     */
+    var deleteResourceMappingAfterRollback: Boolean = true
+    
+    /**
      * 是否启用代码引用分析，默认false
      * 开启后会分析所有模块的代码引用关系，生成依赖图和未使用类报告
      * 作者：Redamancy  时间：2025-05-23
@@ -132,6 +142,11 @@ open class HorizonExtension {
     /**
      * 是否启用资源引用自动更新
      * 默认关闭，需要手动开启该功能
+     * 启用后会自动检测并更新代码中的资源引用，包括:
+     * - Java/Kotlin源码中的R.xxx.yyy引用
+     * - findViewById(R.id.xxx)等方法调用中的资源引用
+     * - setContentView(R.layout.xxx)布局引用
+     * - getIdentifier("name", "type", ...)引用
      * 作者：Redamancy  时间：2025-05-23
      */
     var enableResourceReferenceUpdate: Boolean = false
@@ -169,10 +184,109 @@ open class HorizonExtension {
     /**
      * 是否启用资源MD5计算
      * 默认关闭，需要手动开启该功能
-     * 开启后会为资源文件名添加MD5值，防止资源冲突
+     * 开启后会为资源内容计算MD5值，防止资源冲突
      * 作者：Redamancy  时间：2025-05-23
      */
     var enableResourceMd5: Boolean = false
+    
+    /**
+     * 是否将MD5值加入到文件名中
+     * 默认为true，需要同时设置enableResourceMd5为true才有效
+     * 设置为false时，只修改资源内容的MD5值，不修改文件名
+     * 作者：Redamancy  时间：2025-05-23
+     */
+    var includeMd5InFileName: Boolean = true
+    
+    /**
+     * 是否强制重新处理资源，即使已经处理过
+     * 默认为false，避免每次构建都重命名资源
+     */
+    var forceReprocessResources: Boolean = false
+    
+    /**
+     * 是否启用并行处理资源
+     * 默认为true，利用多线程并行处理资源文件以提高性能
+     * 作者：Redamancy  时间：2025-07-06
+     */
+    var enableParallelProcessing: Boolean = true
+    
+    /**
+     * 处理线程数
+     * 默认为系统可用处理器数量
+     * 作者：Redamancy  时间：2025-07-06
+     */
+    var processorThreadCount: Int = Runtime.getRuntime().availableProcessors()
+    
+    /**
+     * 是否生成资源处理报告
+     * 默认为false，设置为true时将生成详细的资源处理报告
+     * 作者：Redamancy  时间：2025-07-06
+     */
+    var generateResourceReport: Boolean = false
+    
+    /**
+     * 资源处理报告格式
+     * 可选值: json, html
+     * 默认为json
+     * 作者：Redamancy  时间：2025-07-06
+     */
+    var resourceReportFormat: String = "json"
+    
+    /**
+     * 是否处理特定资源类型
+     * 默认为false，设置为true时将对不同类型的资源提供特殊处理
+     * 作者：Redamancy  时间：2025-07-06
+     */
+    var processSpecialResources: Boolean = false
+    
+    /**
+     * 特定资源处理配置
+     * 用于配置针对不同资源类型的处理规则
+     */
+    private val specialResourceConfigs = mutableMapOf<String, SpecialResourceProcessor.ProcessorConfig>()
+    
+    /**
+     * 配置特定资源类型处理器
+     * 
+     * @param resourceType 资源类型
+     * @param action 配置操作
+     */
+    fun configureResourceType(resourceType: String, action: Action<SpecialResourceTypeConfig>) {
+        val config = SpecialResourceTypeConfig()
+        action.execute(config)
+        specialResourceConfigs[resourceType] = SpecialResourceProcessor.ProcessorConfig(
+            enabled = config.enabled,
+            optimizeSize = config.optimizeSize,
+            applyCompression = config.applyCompression,
+            qualityLevel = config.qualityLevel
+        )
+    }
+    
+    /**
+     * 获取特定资源类型处理器配置
+     * 
+     * @return 特定资源类型处理器配置
+     */
+    fun getSpecialResourceConfigs(): Map<String, SpecialResourceProcessor.ProcessorConfig> {
+        return specialResourceConfigs.toMap()
+    }
+    
+    /**
+     * 特定资源类型配置类
+     */
+    class SpecialResourceTypeConfig {
+        /** 是否启用该处理器 */
+        var enabled: Boolean = true
+        
+        /** 是否优化资源大小 */
+        var optimizeSize: Boolean = true
+        
+        /** 是否应用压缩 */
+        var applyCompression: Boolean = false
+        
+        /** 质量级别 (0-100) */
+        var qualityLevel: Int = 80
+    }
     
     /**
      * 验证配置有效性
@@ -190,57 +304,43 @@ open class HorizonExtension {
             isValid = false
         }
         
-        // 验证注册类名
-        if (registerClassName.isBlank()) {
-            PluginLogger.warn("注册类名不能为空，已自动设置为ModuleRegistry")
-            registerClassName = "ModuleRegistry"
+        // 验证资源隔离和回退功能互斥性
+        if (enableResourceIsolation && enableResourceRollback) {
+            PluginLogger.warn("资源隔离(enableResourceIsolation)和资源回退(enableResourceRollback)功能不能同时启用，已自动禁用资源隔离功能")
+            enableResourceIsolation = false
             isValid = false
         }
         
-        // 验证生成包名
-        if (generatedPackage.isBlank()) {
-            PluginLogger.warn("生成包名不能为空，已自动设置为com.neil.plugin.autoregister")
-            generatedPackage = "com.neil.plugin.autoregister"
+        // 验证资源回退功能与资源MD5修改功能互斥性
+        if (enableResourceRollback && enableResourceMd5) {
+            PluginLogger.warn("资源回退(enableResourceRollback)和资源MD5修改(enableResourceMd5)功能不能同时启用，已自动禁用资源MD5修改功能")
+            enableResourceMd5 = false
             isValid = false
-        }
-        
-        // 验证资源前缀模式
-        if (resourcePrefixPattern?.isEmpty() == true) {
-            resourcePrefixPattern = null
-        }
-        
-        // 验证资源后缀模式
-        if (resourceSuffixPattern?.isEmpty() == true) {
-            resourceSuffixPattern = null
         }
         
         // 验证资源命名策略
-        if (resourceNamingStrategy == ResourceNamingStrategy.PREFIX && resourcePrefixPattern == null) {
-            PluginLogger.warn("警告: 已设置前缀命名策略，但未设置资源前缀模式(resourcePrefixPattern)，将使用模块包名的最后一部分作为前缀")
+        try {
+            if (resourceNamingStrategy !is ResourceNamingStrategy) {
+                resourceNamingStrategy = ResourceNamingStrategy.fromString(resourceNamingStrategy.toString())
+            }
+        } catch (e: Exception) {
+            PluginLogger.warn("无效的资源命名策略: $resourceNamingStrategy，已自动设置为PREFIX")
+            resourceNamingStrategy = ResourceNamingStrategy.PREFIX
+            isValid = false
         }
         
-        if (resourceNamingStrategy == ResourceNamingStrategy.SUFFIX && resourceSuffixPattern == null) {
-            PluginLogger.warn("警告: 已设置后缀命名策略，但未设置资源后缀模式(resourceSuffixPattern)，将使用'_模块名'作为默认后缀")
+        // 验证处理线程数
+        if (processorThreadCount < 1) {
+            PluginLogger.warn("处理线程数必须大于0，已自动设置为CPU核心数: ${Runtime.getRuntime().availableProcessors()}")
+            processorThreadCount = Runtime.getRuntime().availableProcessors()
+            isValid = false
         }
         
-        // 验证是否启用代码引用分析
-        if (generateDependencyGraph && !enableCodeReferenceAnalysis) {
-            generateDependencyGraph = false
-        }
-        
-        // 验证是否检测未使用的类
-        if (detectUnusedClasses && !enableCodeReferenceAnalysis) {
-            detectUnusedClasses = false
-        }
-        
-        // 验证是否启用资源引用自动更新
-        if (enableResourceReferenceUpdate && resourcePrefixPattern == null) {
-            PluginLogger.warn("警告: 已启用资源引用自动更新，但未设置资源前缀模式(resourcePrefixPattern)，这可能导致无法正确更新资源引用")
-        }
-        
-        // 验证是否启用资源隔离
-        if (enableResourceIsolation && resourcePrefixPattern == null) {
-            PluginLogger.warn("警告: 已启用资源隔离，但未设置资源前缀模式(resourcePrefixPattern)，将使用模块包名的最后一部分作为前缀")
+        // 验证资源报告格式
+        if (resourceReportFormat !in listOf("json", "html")) {
+            PluginLogger.warn("无效的资源报告格式: $resourceReportFormat，已自动设置为json")
+            resourceReportFormat = "json"
+            isValid = false
         }
         
         return isValid
